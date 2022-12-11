@@ -46,12 +46,8 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
     }
 
     /// @inheritdoc IRewardManager
-    function giveBlockReward(uint32 stakerId, uint32 epoch) external override onlyRole(REWARD_MODIFIER_ROLE) {
+    function giveBlockReward(uint32 stakerId, uint32 epoch) external override initialized onlyRole(REWARD_MODIFIER_ROLE) {
         Structs.Staker memory staker = stakeManager.getStaker(stakerId);
-        if (!staker.acceptDelegation) {
-            stakeManager.setStakerStake(epoch, stakerId, StakeChanged.BlockReward, staker.stake, staker.stake + blockReward);
-            return;
-        }
         IStakedToken sToken = IStakedToken(staker.tokenAddress);
         uint256 totalSupply = sToken.totalSupply();
         uint256 stakerSRZR = sToken.balanceOf(staker._address);
@@ -59,7 +55,7 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
         uint8 commissionApplicable = staker.commission < maxCommission ? staker.commission : maxCommission;
         uint256 stakerReward = (delegatorShare * commissionApplicable) / 100;
         stakeManager.setStakerStake(epoch, stakerId, StakeChanged.BlockReward, staker.stake, staker.stake + (blockReward - stakerReward));
-        stakeManager.setStakerStakerReward(
+        stakeManager.setStakerReward(
             epoch,
             stakerId,
             StakerRewardChanged.StakerRewardAdded,
@@ -69,7 +65,7 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
     }
 
     /// @inheritdoc IRewardManager
-    function giveInactivityPenalties(uint32 epoch, uint32 stakerId) external override onlyRole(REWARD_MODIFIER_ROLE) {
+    function giveInactivityPenalties(uint32 epoch, uint32 stakerId) external override initialized onlyRole(REWARD_MODIFIER_ROLE) {
         _giveInactivityPenalties(epoch, stakerId);
     }
 
@@ -77,6 +73,8 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
      * @dev inactivity penalties are given to stakers if they have been inactive for more than the grace period.
      * For each inactive epoch, stakers lose their age by 1*10000 and their stake by penaltyNotRevealNum.
      * Activity is calculated based on the epoch the staker last revealed in.
+     * @param epoch in which inactivityPenalties if any, are being checked and given out
+     * @param stakerId id of the staker for whom inactivityPenalties are being checked and given out
      */
     function _giveInactivityPenalties(uint32 epoch, uint32 stakerId) internal {
         uint32 epochLastRevealed = voteManager.getEpochLastRevealed(stakerId);
@@ -93,7 +91,7 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
         uint32 previousAge = thisStaker.age;
         uint32 newAge = thisStaker.age;
 
-        if (inactiveEpochs > gracePeriod) {
+        if (inactiveEpochs > 0) {
             (newStake, newAge) = _calculateInactivityPenalties(inactiveEpochs, newStake, previousAge);
         }
         // uint256 currentStake = previousStake;
@@ -111,6 +109,8 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
      * and their votes in the previous epoch compared to the medians confirmed. Penalties on votes depend upon how far were
      * the staker's votes from the median value. There is tolerance being added for each collection thereby not penalizing
      * stakers of their vote was within the tolerance limits of the collection
+     * @param epoch in which penalties if any, are being checked and given out
+     * @param stakerId id of the staker for whom penalties are being checked and given out
      */
     function _givePenalties(uint32 epoch, uint32 stakerId) internal {
         _giveInactivityPenalties(epoch, stakerId);
@@ -126,32 +126,32 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
         Structs.Block memory _block = blockManager.getBlock(epochLastRevealed);
 
         uint16[] memory idsRevealedLastEpoch = _block.ids;
-        uint32[] memory mediansLastEpoch = _block.medians;
+        uint256[] memory mediansLastEpoch = _block.medians;
 
         if (idsRevealedLastEpoch.length == 0) return;
-        uint64 penalty = 0;
+        uint256 penalty = 0;
         for (uint16 i = 0; i < idsRevealedLastEpoch.length; i++) {
             // get leaf id from collection id, as voting happens w.r.t leaf ids
             // slither-disable-next-line calls-loop
-            uint16 leafId = collectionManager.getLeafIdOfCollectionForLastEpoch(idsRevealedLastEpoch[i]);
-            // slither-disable-next-line calls-loop
-            uint64 voteValueLastEpoch = voteManager.getVoteValue(epoch - 1, stakerId, leafId);
+            uint256 voteValueLastEpoch = voteManager.getVoteValue(epoch - 1, stakerId, idsRevealedLastEpoch[i]);
             if (
                 voteValueLastEpoch != 0
             ) // Only penalise if given asset revealed, please note here again revealed value of asset cant be zero
             {
-                uint32 medianLastEpoch = mediansLastEpoch[i];
-                if (medianLastEpoch == 0) continue;
-                uint64 prod = age * voteValueLastEpoch;
+                uint256 medianLastEpoch = mediansLastEpoch[i];
+                if (medianLastEpoch == 0) continue; //WARNING: unreachable. Can be removed
+                uint256 prod = age * voteValueLastEpoch;
                 // slither-disable-next-line calls-loop
-                uint32 tolerance = collectionManager.getCollectionTolerance(i);
+                uint32 tolerance = collectionManager.getCollectionTolerance(idsRevealedLastEpoch[i]);
                 tolerance = tolerance <= maxTolerance ? tolerance : maxTolerance;
-                uint64 maxVoteTolerance = medianLastEpoch + ((medianLastEpoch * tolerance) / BASE_DENOMINATOR);
-                uint64 minVoteTolerance = medianLastEpoch - ((medianLastEpoch * tolerance) / BASE_DENOMINATOR);
+                uint256 maxVoteTolerance = medianLastEpoch + ((medianLastEpoch * tolerance) / BASE_DENOMINATOR);
+                uint256 minVoteTolerance = medianLastEpoch - ((medianLastEpoch * tolerance) / BASE_DENOMINATOR);
                 // if (voteWeightLastEpoch > 0) {
                 if (voteValueLastEpoch > maxVoteTolerance) {
+                    //penalty = age(vote/maxvote-1)
                     penalty = penalty + (prod / maxVoteTolerance - age);
                 } else if (voteValueLastEpoch < minVoteTolerance) {
+                    //penalty = age(1-vote/minvote)
                     penalty = penalty + (age - prod / minVoteTolerance);
                 }
             }
@@ -164,6 +164,7 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
     /** @notice Calculates the stake and age inactivity penalties of the staker
      * @param epochs The difference of epochs where the staker was inactive
      * @param stakeValue The Stake that staker had in last epoch
+     * @param ageValue The age that staker had in last epoch
      */
     function _calculateInactivityPenalties(
         uint32 epochs,
@@ -172,8 +173,8 @@ contract RewardManager is Initializable, Constants, RewardManagerParams, IReward
     ) internal view returns (uint256, uint32) {
         uint256 penalty = ((epochs) * (stakeValue * penaltyNotRevealNum)) / BASE_DENOMINATOR;
         uint256 newStake = penalty < stakeValue ? stakeValue - penalty : 0;
-        uint32 penaltyAge = epochs * 10000;
-        uint32 newAge = penaltyAge < ageValue ? ageValue - penaltyAge : 0;
+        uint256 penaltyAge = (uint256(epochs) * (uint256(ageValue) * uint256(penaltyAgeNotRevealNum))) / BASE_DENOMINATOR;
+        uint32 newAge = uint32(penaltyAge) < ageValue ? ageValue - uint32(penaltyAge) : 0;
         return (newStake, newAge);
     }
 }
